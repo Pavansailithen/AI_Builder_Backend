@@ -1,0 +1,38 @@
+{
+  "summary": {
+    "evaluation_date": "2026-04-30T04:20:48.936427",
+    "total_prompts": 1,
+    "successful": 1,
+    "failed": 0,
+    "success_rate": "100%",
+    "normal_success_rate": "100%",
+    "edge_case_success_rate": "0%",
+    "avg_latency_seconds": 184.48,
+    "avg_runtime_score": 67.0,
+    "total_evaluation_time_minutes": 3.1,
+    "failure_types": {},
+    "dataset_version": "1.0.0"
+  },
+  "results": [
+    {
+      "id": "N01",
+      "category": "crm",
+      "difficulty": "normal",
+      "prompt": "Build a CRM with login, contacts management, dashboard, role-based access for Admin and User roles, ...",
+      "status": "success",
+      "latency_seconds": 184.48,
+      "retries": 0,
+      "runtime_score": 67,
+      "executable": true,
+      "pages_generated": 5,
+      "endpoints_generated": 22,
+      "tables_generated": 5,
+      "roles_generated": 2,
+      "assumptions_made": 5,
+      "warnings_count": 6,
+      "failure_reason": null,
+      "failure_type": null,
+      "expected_behavior": "n/a"
+    }
+  ]
+}
