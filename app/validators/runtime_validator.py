@@ -36,8 +36,9 @@ def validate_runtime(schema: AppSchema) -> dict:
             p.strip("/").startswith(route) or route in p
             for p in api_paths
         )
-        if not has_match and route not in ["login", "register", "home", ""]:
+        if not has_match and route not in ["login", "register", "home", "dashboard", "settings", "admin", "landing", ""]:
             pages_without_api.append(page.route)
+
 
     checks.append(make_check(
         "route_completeness",

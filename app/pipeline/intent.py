@@ -4,6 +4,7 @@ import json
 
 from pydantic import ValidationError
 
+from app.utils.config import config
 from app.utils.gemini import call_gemini
 from app.validators.models import IntentEntity, IntentOutput
 
@@ -42,8 +43,10 @@ async def extract_intent(prompt: str) -> IntentOutput:
 
     full_prompt = f"{system_prompt}\n\nUser's app description:\n{prompt}"
 
+    active_model = config.GROQ_MODEL.lower()
+    max_tokens = 4096 if ("27b" in active_model or "qwen" in active_model) else 512
     # Call Gemini
-    raw_response = await call_gemini(full_prompt)
+    raw_response = await call_gemini(full_prompt, max_tokens=max_tokens)
 
     # Clean the response
     cleaned = raw_response.strip()

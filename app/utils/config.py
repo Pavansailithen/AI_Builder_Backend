@@ -17,7 +17,7 @@ class Config:
     PORT: int = int(os.getenv("PORT", 8000))
     MAX_PIPELINE_ATTEMPTS: int = 3
     MAX_REPAIR_ATTEMPTS: int = 3
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     PIPELINE_VERSION: str = "1.0.0"
 
 

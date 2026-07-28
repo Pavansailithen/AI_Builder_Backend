@@ -5,6 +5,7 @@ from datetime import datetime
 
 from pydantic import ValidationError
 
+from app.utils.config import config
 from app.utils.gemini import call_gemini
 from app.validators.models import (
     AppSchema,
@@ -26,12 +27,29 @@ from app.validators.models import (
 
 async def clean_and_parse(raw: str, stage_name: str) -> dict:
     cleaned = raw.strip()
-    if cleaned.startswith("```json"):
-        cleaned = cleaned[len("```json"):]
-    elif cleaned.startswith("```"):
-        cleaned = cleaned[len("```"):]
-    if cleaned.endswith("```"):
-        cleaned = cleaned[: -len("```")]
+    
+    # Robustly extract from markdown code blocks
+    if "```json" in cleaned:
+        parts = cleaned.split("```json")
+        if len(parts) > 1:
+            after_json = parts[1]
+            if "```" in after_json:
+                cleaned = after_json.split("```")[0].strip()
+    elif "```" in cleaned:
+        parts = cleaned.split("```")
+        for part in parts:
+            part_str = part.strip()
+            if part_str.startswith("{") and part_str.endswith("}"):
+                cleaned = part_str
+                break
+    else:
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+            
     cleaned = cleaned.strip()
 
     try:
@@ -55,7 +73,7 @@ async def generate_schemas(
     intent: IntentOutput, design: SystemDesignOutput
 ) -> AppSchema:
 
-    # Shared context injected into every prompt
+    # Shared context injected into the prompt
     context = f"""
 App Name: {design.app_name}
 Entities: {[e.name for e in design.entities]}
@@ -67,199 +85,129 @@ Auth Flow: {design.auth_flow}
 Business Rules: {design.business_rules}
 """
 
-    # ------------------------------------------------------------------
-    # CALL 1 — Database Schema
-    # ------------------------------------------------------------------
-    db_prompt = f"""You are a database schema generator.
-Given this app design, generate a complete PostgreSQL database schema.
+    system_prompt = (
+        "You are a software architect who designs database structures, REST APIs, UI pages, user roles, and business rules.\n"
+        "Given an app name, user roles, features, pages, database tables, and business rules, generate a complete and consistent application schema JSON.\n"
+        "\n"
+        "Return ONLY a valid JSON object with the following exact structure:\n"
+        "{\n"
+        '  "ui": {\n'
+        '    "pages": [\n'
+        '      {\n'
+        '        "name": "PageName (PascalCase string, e.g., ProjectDashboardPage)",\n'
+        '        "route": "/route (string, e.g., /projects)",\n'
+        '        "components": [\n'
+        '          {\n'
+        '            "type": "table|form|chart|card|modal|sidebar|navbar (must be one of these)",\n'
+        '            "name": "ComponentName (PascalCase string, e.g., ProjectList)",\n'
+        '            "fields": ["list of fields, as strings"],\n'
+        '            "actions": ["list of actions, as strings"],\n'
+        '            "props": {} (an object with key/value string pairs)\n'
+        '          }\n'
+        '        ],\n'
+        '        "access": ["list of role names allowed to access, e.g., Admin"],\n'
+        '        "layout": "default|sidebar|fullscreen"\n'
+        '      }\n'
+        '    ],\n'
+        '    "global_components": []\n'
+        '  },\n'
+        '  "api": {\n'
+        '    "endpoints": [\n'
+        '      {\n'
+        '        "path": "/path (string, e.g., /api/v1/projects)",\n'
+        '        "method": "GET|POST|PUT|DELETE|PATCH",\n'
+        '        "description": "what this endpoint does",\n'
+        '        "auth_required": true|false,\n'
+        '        "roles": ["list of user roles allowed to access"],\n'
+        '        "request_body": {"field_name": "type"} (or null/empty),\n'
+        '        "response_fields": ["list of field names as strings"],\n'
+        '        "validation_rules": {"field_name": "rule description"} (or null/empty)\n'
+        '      }\n'
+        '    ],\n'
+        '    "base_url": "/api/v1",\n'
+        '    "auth_endpoint": "/api/v1/auth/login"\n'
+        '  },\n'
+        '  "database": {\n'
+        '    "tables": [\n'
+        '      {\n'
+        '        "name": "lowercase_table_name",\n'
+        '        "columns": [\n'
+        '          {\n'
+        '            "name": "column_name",\n'
+        '            "type": "integer|string|text|boolean|float|datetime|json (must be one of these)",\n'
+        '            "primary_key": true|false,\n'
+        '            "nullable": true|false,\n'
+        '            "unique": true|false,\n'
+        '            "default": "default_value as a string or null"\n'
+        '          }\n'
+        '        ],\n'
+        '        "relations": [\n'
+        '          {\n'
+        '            "type": "one_to_many|many_to_one|many_to_many|one_to_one (must be one of these)",\n'
+        '            "target_table": "table_name",\n'
+        '            "foreign_key": "column_name"\n'
+        '          }\n'
+        '        ]\n'
+        '      }\n'
+        '    ],\n'
+        '    "database_type": "postgresql"\n'
+        '  },\n'
+        '  "auth": {\n'
+        '    "roles": ["list of user roles"],\n'
+        '    "permissions": {\n'
+        '      "role_name": ["list of permission strings"]\n'
+        '    },\n'
+        '    "auth_method": "jwt",\n'
+        '    "token_expiry": "24h",\n'
+        '    "refresh_token": true\n'
+        '  },\n'
+        '  "business_logic": {\n'
+        '    "rules": [\n'
+        '      {\n'
+        '        "name": "rule_name_snake_case",\n'
+        '        "description": "description",\n'
+        '        "condition": "logical condition",\n'
+        '        "affected_routes": ["list of affected API endpoint paths"],\n'
+        '        "action": "action description"\n'
+        '      }\n'
+        '    ]\n'
+        '  }\n'
+        "}\n"
+        "\n"
+        "Design Constraints:\n"
+        "1. Every page defined in the list of pages must be generated in the ui.pages section. Every generated page must contain at least one UI component.\n"
+        "2. Every page the user can navigate to must be backed by a working API endpoint. The page's route (excluding home, login, register, and empty routes) must match or be a substring of the API endpoint path. For example, a UI route '/projects' can correspond to '/api/v1/projects' or '/api/v1/projects/{id}'.\n"
+        "3. Every API endpoint that requires authentication must specify which user role(s) can access it, and those roles must be defined in the main Auth configuration roles list.\n"
+        "4. Database table names referenced by API endpoints must exactly match table names defined in the DB section (avoid singular/plural mismatches). Specifically, ensure the third segment of the API endpoint path (e.g., 'projects' in '/api/v1/projects') exactly matches the name of a database table.\n"
+        "5. Foreign key relationships in the DB section must only point to tables that exist in the same schema.\n"
+        "6. Any route referenced by a business rule must be a route that actually exists in the API section.\n"
+        "7. All roles used in UI page access settings and API endpoints must be defined in the main Auth configuration roles list.\n"
+        "8. Every database table must contain an 'id' primary key column (integer type) and a 'created_at' column (datetime type).\n"
+        "9. For every database table, generate standard CRUD endpoints (GET list, GET single, POST, PUT, DELETE) in the API endpoints list.\n"
+        "10. Return ONLY valid JSON. Do not include markdown code blocks, explanation, or extra characters.\n"
+        "11. Be extremely concise in descriptions and field lists to minimize the JSON size and avoid truncation."
+    )
 
-Return ONLY valid JSON matching this exact structure:
-{{
-  "tables": [
-    {{
-      "name": "lowercase_table_name",
-      "columns": [
-        {{
-          "name": "column_name",
-          "type": "integer|string|text|boolean|float|datetime|json",
-          "primary_key": true,
-          "nullable": false,
-          "unique": false,
-          "default": "default_value or null"
-        }}
-      ],
-      "relations": [
-        {{
-          "type": "one_to_many|many_to_one|many_to_many|one_to_one",
-          "target_table": "table_name",
-          "foreign_key": "column_name"
-        }}
-      ]
-    }}
-  ],
-  "database_type": "postgresql"
-}}
+    full_prompt = f"{system_prompt}\n\nApp Design Context:\n{context}"
+    active_model = config.GROQ_MODEL.lower()
+    max_tokens = 2048
+    if "27b" in active_model or "qwen" in active_model:
+        max_tokens = 4096
+    elif "70b" in active_model:
+        max_tokens = 6144
+    raw_response = await call_gemini(full_prompt, max_tokens=max_tokens)
+    parsed_data = await clean_and_parse(raw_response, "Full Schema Generation")
 
-Rules:
-- Every table must have an id column as integer primary_key
-- Every table must have created_at as datetime
-- String foreign keys must match actual table names
-- Return ONLY JSON, no markdown, no explanation
+    # Validate individual parts of the JSON with Pydantic
+    try:
+        ui_schema = UISchema(**parsed_data.get("ui", {}))
+        api_schema = APISchema(**parsed_data.get("api", {}))
+        db_schema = DatabaseSchema(**parsed_data.get("database", {}))
+        auth_schema = AuthSchema(**parsed_data.get("auth", {}))
+        bl_schema = BusinessLogicSchema(**parsed_data.get("business_logic", {}))
+    except ValidationError as e:
+        raise ValueError(f"Schema compilation model validation failed: {str(e)}")
 
-App Design Context:
-{context}"""
-
-    db_raw = await call_gemini(db_prompt)
-    db_data = await clean_and_parse(db_raw, "DB Schema")
-    db_schema = DatabaseSchema(**db_data)
-
-    # ------------------------------------------------------------------
-    # CALL 2 — API Schema
-    # ------------------------------------------------------------------
-    api_prompt = f"""You are an API schema generator.
-Given this app design and database schema, generate complete REST API endpoints.
-
-Return ONLY valid JSON matching this exact structure:
-{{
-  "endpoints": [
-    {{
-      "path": "/resource/action",
-      "method": "GET|POST|PUT|DELETE|PATCH",
-      "description": "what this endpoint does",
-      "auth_required": true,
-      "roles": ["role1", "role2"],
-      "request_body": {{"field": "type"}},
-      "response_fields": ["field1", "field2"],
-      "validation_rules": {{"field": "rule description"}}
-    }}
-  ],
-  "base_url": "/api/v1",
-  "auth_endpoint": "/api/v1/auth/login"
-}}
-
-Rules:
-- Every db table must have at minimum GET (list), GET (single), POST, PUT, DELETE endpoints
-- Auth endpoints do not require auth_required
-- Roles must be from this list: {design.roles}
-- Return ONLY JSON, no markdown, no explanation
-
-App Design Context:
-{context}
-
-Database Tables Generated:
-{json.dumps(db_data, indent=2)}"""
-
-    api_raw = await call_gemini(api_prompt)
-    api_data = await clean_and_parse(api_raw, "API Schema")
-    api_schema = APISchema(**api_data)
-
-    # ------------------------------------------------------------------
-    # CALL 3 — Auth Schema
-    # ------------------------------------------------------------------
-    auth_prompt = f"""You are an auth schema generator.
-Given this app design, generate the complete authentication and authorization schema.
-
-Return ONLY valid JSON matching this exact structure:
-{{
-  "roles": ["role1", "role2"],
-  "permissions": {{
-    "role_name": ["permission1", "permission2"]
-  }},
-  "auth_method": "jwt",
-  "token_expiry": "24h",
-  "refresh_token": true
-}}
-
-Rules:
-- Roles must match exactly: {design.roles}
-- Permissions must reflect the business rules
-- Return ONLY JSON, no markdown, no explanation
-
-App Design Context:
-{context}"""
-
-    auth_raw = await call_gemini(auth_prompt)
-    auth_data = await clean_and_parse(auth_raw, "Auth Schema")
-    auth_schema = AuthSchema(**auth_data)
-
-    # ------------------------------------------------------------------
-    # CALL 4 — UI Schema
-    # ------------------------------------------------------------------
-    ui_prompt = f"""You are a UI schema generator.
-Given this app design, generate the complete UI schema with all pages and components.
-
-Return ONLY valid JSON matching this exact structure:
-{{
-  "pages": [
-    {{
-      "name": "PageName",
-      "route": "/route",
-      "components": [
-        {{
-          "type": "table|form|chart|card|modal|sidebar|navbar",
-          "name": "ComponentName",
-          "fields": ["field1", "field2"],
-          "actions": ["action1", "action2"],
-          "props": {{}}
-        }}
-      ],
-      "access": ["role1", "role2"],
-      "layout": "default|sidebar|fullscreen"
-    }}
-  ],
-  "global_components": [
-    {{
-      "type": "navbar|sidebar",
-      "name": "ComponentName",
-      "fields": ["field1"],
-      "actions": ["action1"],
-      "props": {{}}
-    }}
-  ]
-}}
-
-Rules:
-- Every page in {design.pages} must be included
-- Access roles must be from {design.roles}
-- Every page must have at least one component
-- Return ONLY JSON, no markdown, no explanation
-
-App Design Context:
-{context}"""
-
-    ui_raw = await call_gemini(ui_prompt)
-    ui_data = await clean_and_parse(ui_raw, "UI Schema")
-    ui_schema = UISchema(**ui_data)
-
-    # ------------------------------------------------------------------
-    # CALL 5 — Business Logic Schema
-    # ------------------------------------------------------------------
-    bl_prompt = f"""You are a business logic schema generator.
-Given these business rules, generate structured business logic.
-
-Return ONLY valid JSON matching this exact structure:
-{{
-  "rules": [
-    {{
-      "name": "rule_name_snake_case",
-      "description": "human readable description",
-      "condition": "logical condition as string",
-      "affected_routes": ["/route1", "/route2"],
-      "action": "what happens when condition is met"
-    }}
-  ]
-}}
-
-Rules to convert: {design.business_rules}
-Return ONLY JSON, no markdown, no explanation."""
-
-    bl_raw = await call_gemini(bl_prompt)
-    bl_data = await clean_and_parse(bl_raw, "Business Logic")
-    bl_schema = BusinessLogicSchema(**bl_data)
-
-    # ------------------------------------------------------------------
-    # Assemble final AppSchema
-    # ------------------------------------------------------------------
     metadata = PipelineMetadata(
         generated_at=datetime.utcnow().isoformat(),
         pipeline_version="1.0.0",
@@ -279,3 +227,4 @@ Return ONLY JSON, no markdown, no explanation."""
     )
 
     return app_schema
+

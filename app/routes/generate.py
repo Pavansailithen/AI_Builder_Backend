@@ -19,6 +19,8 @@ router = APIRouter()
 # --- BACKGROUND PIPELINE TASK ---
 
 async def run_pipeline_background(job_id: str, prompt: str):
+    import time
+    start_time = time.time()
     try:
         update_job(job_id, status="processing", current_stage="intent_extraction", progress=10)
         from app.pipeline.intent import extract_intent
@@ -50,8 +52,32 @@ async def run_pipeline_background(job_id: str, prompt: str):
         }
         complete_job(job_id, result)
 
+        # Log to evaluation report
+        try:
+            from app.evaluation.runner import log_user_prompt
+            log_user_prompt(
+                prompt=prompt,
+                status="success",
+                schema_dict=refined.model_dump(),
+                latency=time.time() - start_time
+            )
+        except Exception as log_err:
+            print(f"Failed to log user prompt to evaluation report: {log_err}")
+
     except Exception as e:
         fail_job(job_id, str(e))
+
+        # Log to evaluation report
+        try:
+            from app.evaluation.runner import log_user_prompt
+            log_user_prompt(
+                prompt=prompt,
+                status="failed",
+                error_msg=str(e),
+                latency=time.time() - start_time
+            )
+        except Exception as log_err:
+            print(f"Failed to log user prompt failure to evaluation report: {log_err}")
 
 
 # --- MAIN PRODUCTION ROUTE ---
@@ -68,12 +94,41 @@ async def generate(request: GenerateRequest):
     3. Schema Generation (UI + API + DB + Auth + Business Logic)
     4. Refinement (cross-layer consistency)
     """
+    import time
+    start_time = time.time()
     try:
         result = await run_pipeline(request.prompt)
         result["prompt_received"] = request.prompt
         result["pipeline_version"] = "1.0.0"
+
+        # Log to evaluation report
+        try:
+            from app.evaluation.runner import log_user_prompt
+            status = "success" if result.get("status") in ("success", "success_with_warnings") else "failed"
+            log_user_prompt(
+                prompt=request.prompt,
+                status=status,
+                schema_dict=result.get("schema"),
+                error_msg=result.get("error"),
+                latency=time.time() - start_time
+            )
+        except Exception as log_err:
+            print(f"Failed to log user prompt to evaluation report: {log_err}")
+
         return JSONResponse(status_code=200, content=result)
     except Exception as e:
+        # Log to evaluation report
+        try:
+            from app.evaluation.runner import log_user_prompt
+            log_user_prompt(
+                prompt=request.prompt,
+                status="failed",
+                error_msg=str(e),
+                latency=time.time() - start_time
+            )
+        except Exception as log_err:
+            print(f"Failed to log user prompt failure to evaluation report: {log_err}")
+
         return JSONResponse(status_code=500, content={
             "status": "failed",
             "error": str(e),

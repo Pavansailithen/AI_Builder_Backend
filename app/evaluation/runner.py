@@ -179,3 +179,128 @@ async def run_evaluation(prompt_ids: list = None) -> dict:
     print(f"{'='*50}\n")
 
     return final_report
+
+
+def log_user_prompt(prompt: str, status: str, schema_dict: dict = None, error_msg: str = None, latency: float = 0.0):
+    """
+    Saves a user-submitted prompt execution result to results.json, keeping only the last 10.
+    """
+    import os
+    import json
+    import time
+    from datetime import datetime
+    
+    user_result = {
+        "id": "PENDING",
+        "category": "user_submitted",
+        "difficulty": "normal",
+        "prompt": prompt[:100] + "..." if len(prompt) > 100 else prompt,
+        "status": status,
+        "latency_seconds": round(latency, 2),
+        "retries": 0,
+        "runtime_score": 0,
+        "executable": False,
+        "pages_generated": 0,
+        "endpoints_generated": 0,
+        "tables_generated": 0,
+        "roles_generated": 0,
+        "assumptions_made": 0,
+        "warnings_count": 0,
+        "failure_reason": error_msg[:200] if error_msg else None,
+        "failure_type": "unknown" if status == "failed" else None,
+        "expected_behavior": "n/a",
+        "timestamp": time.time()
+    }
+    
+    if status == "success" and schema_dict:
+        try:
+            user_result["pages_generated"] = len(schema_dict.get("ui", {}).get("pages", []))
+            user_result["endpoints_generated"] = len(schema_dict.get("api", {}).get("endpoints", []))
+            user_result["tables_generated"] = len(schema_dict.get("database", {}).get("tables", []))
+            user_result["roles_generated"] = len(schema_dict.get("auth", {}).get("roles", []))
+            user_result["warnings_count"] = len(schema_dict.get("metadata", {}).get("warnings", []))
+            user_result["assumptions_made"] = len(schema_dict.get("metadata", {}).get("assumptions", []))
+        except Exception:
+            pass
+            
+        try:
+            from app.validators.models import AppSchema
+            from app.validators.runtime_validator import validate_runtime
+            app_schema = AppSchema.model_validate(schema_dict)
+            runtime = validate_runtime(app_schema)
+            user_result["runtime_score"] = runtime["score"]
+            user_result["executable"] = runtime["executable"]
+        except Exception:
+            pass
+            
+    # Load existing results
+    all_results = []
+    if os.path.exists(RESULTS_FILE):
+        try:
+            with open(RESULTS_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "results" in data:
+                    all_results = data["results"]
+        except Exception:
+            pass
+            
+    # Separate user and non-user results
+    non_user_results = [r for r in all_results if r.get("category") != "user_submitted" and not r.get("id", "").startswith("U")]
+    user_results = [r for r in all_results if r.get("category") == "user_submitted" or r.get("id", "").startswith("U")]
+    
+    # Add new user result
+    user_results.append(user_result)
+    
+    # Sort user results by timestamp to keep them ordered
+    user_results.sort(key=lambda x: x.get("timestamp", 0))
+    
+    # Keep only the last 10 user results
+    user_results = user_results[-10:]
+    
+    # Re-index user results IDs sequentially (U01 to U10)
+    for idx, ur in enumerate(user_results):
+        ur["id"] = f"U{idx+1:02d}"
+        
+    # Combine back
+    final_results = non_user_results + user_results
+    
+    # Calculate summary
+    successful = [r for r in final_results if r["status"] == "success"]
+    failed = [r for r in final_results if r["status"] == "failed"]
+    
+    failure_types = {}
+    for r in failed:
+        ft = r.get("failure_type") or "unknown"
+        failure_types[ft] = failure_types.get(ft, 0) + 1
+        
+    avg_latency = round(sum(r.get("latency_seconds", 0) for r in final_results) / len(final_results), 2) if final_results else 0
+    avg_score = round(sum(r.get("runtime_score", 0) for r in successful) / len(successful), 1) if successful else 0
+    
+    normal_results = [r for r in final_results if r.get("difficulty") == "normal"]
+    edge_results = [r for r in final_results if r.get("difficulty") == "edge_case"]
+    normal_success = len([r for r in normal_results if r.get("status") == "success"])
+    edge_success = len([r for r in edge_results if r.get("status") == "success"])
+    
+    summary = {
+        "evaluation_date": datetime.utcnow().isoformat(),
+        "total_prompts": len(final_results),
+        "successful": len(successful),
+        "failed": len(failed),
+        "success_rate": f"{round(len(successful)/len(final_results)*100)}%" if final_results else "0%",
+        "normal_success_rate": f"{round(normal_success/len(normal_results)*100)}%" if normal_results else "0%",
+        "edge_case_success_rate": f"{round(edge_success/len(edge_results)*100)}%" if edge_results else "0%",
+        "avg_latency_seconds": avg_latency,
+        "avg_runtime_score": avg_score,
+        "total_evaluation_time_minutes": round(sum(r.get("latency_seconds", 0) for r in final_results) / 60, 1),
+        "failure_types": failure_types,
+        "dataset_version": "hybrid-user-dataset"
+    }
+    
+    final_report = {
+        "summary": summary,
+        "results": final_results
+    }
+    
+    # Save to file
+    with open(RESULTS_FILE, "w") as f:
+        json.dump(final_report, f, indent=2)

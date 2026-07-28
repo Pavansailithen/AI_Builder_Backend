@@ -3,6 +3,8 @@
 import json
 from app.utils.gemini import call_gemini
 from app.validators.models import AppSchema
+from app.utils.config import config
+
 
 
 def check_consistency(schema: AppSchema) -> list[str]:
@@ -49,6 +51,32 @@ def check_consistency(schema: AppSchema) -> list[str]:
             if not found:
                 issues.append(f"Business rule '{rule.name}' references undefined route '{route}'")
 
+    # Check 6: UI Page Route Completeness (routes must map to API paths)
+    for page in schema.ui.pages:
+        route = page.route.strip("/")
+        has_match = any(
+            p.strip("/").startswith(route) or route in p
+            for p in valid_api_paths
+        )
+        if not has_match and route not in ["login", "register", "home", "dashboard", "settings", "admin", "landing", ""]:
+            issues.append(f"UI page '{page.name}' with route '{page.route}' has no matching API endpoint path")
+
+
+    # Check 7: API Endpoint Auth Coverage (auth_required endpoints must have roles)
+    for endpoint in schema.api.endpoints:
+        if endpoint.auth_required and len(endpoint.roles) == 0:
+            issues.append(f"API endpoint '{endpoint.path}' requires authentication but has no roles defined")
+
+    # Check 8: API Endpoint DB Coverage (API groups must match DB table names)
+    api_groups = set()
+    for endpoint in schema.api.endpoints:
+        parts = endpoint.path.strip("/").split("/")
+        if len(parts) >= 3:
+            api_groups.add(parts[2])
+    for g in api_groups:
+        if g not in valid_table_names and g not in ["auth", "analytics"]:
+            issues.append(f"API group '{g}' references undefined database table '{g}'")
+
     return issues
 
 
@@ -67,8 +95,8 @@ async def refine_schema(schema: AppSchema) -> AppSchema:
     # Build issues summary string
     issues_text = "\n".join(f"- {issue}" for issue in issues)
 
-    # Build schema JSON for context
-    schema_json = schema.model_dump_json(indent=2)
+    # Build schema JSON for context (compact representation to save tokens)
+    schema_json = schema.model_dump_json()
 
     # Call Groq to fix issues
     fix_prompt = f"""You are a schema refinement engine for an app generation system.
@@ -89,16 +117,51 @@ RULES FOR FIXING:
 CURRENT SCHEMA:
 {schema_json}"""
 
-    raw = await call_gemini(fix_prompt)
+    # Dynamically calculate max_tokens to stay safely under Groq's TPM limits
+    active_model = config.GROQ_MODEL.lower()
+    if "70b" in active_model:
+        max_total_tokens = 11500  # 12k TPM limit
+    elif "27b" in active_model or "qwen" in active_model:
+        max_total_tokens = 7500   # 8k TPM limit
+    else:
+        max_total_tokens = 5500   # 6k TPM limit (for 8b)
 
-    # Clean response
+    # 4 characters per token is a safe estimation.
+    estimated_prompt_tokens = len(fix_prompt) // 4
+    estimated_output_tokens = (len(schema_json) // 4) + 1000  # output size matches input schema size + 1000 buffer
+    
+    if estimated_prompt_tokens + estimated_output_tokens > max_total_tokens:
+        max_tokens = max(2048, max_total_tokens - estimated_prompt_tokens)
+    else:
+        max_tokens = max(2048, estimated_output_tokens)
+        
+    max_tokens = min(8192, max_tokens)
+
+    raw = await call_gemini(fix_prompt, max_tokens=max_tokens)
+
+    # Clean response robustly
     cleaned = raw.strip()
-    if cleaned.startswith("```json"):
-        cleaned = cleaned[7:]
-    if cleaned.startswith("```"):
-        cleaned = cleaned[3:]
-    if cleaned.endswith("```"):
-        cleaned = cleaned[:-3]
+    if "```json" in cleaned:
+        parts = cleaned.split("```json")
+        if len(parts) > 1:
+            after_json = parts[1]
+            if "```" in after_json:
+                cleaned = after_json.split("```")[0].strip()
+    elif "```" in cleaned:
+        parts = cleaned.split("```")
+        for part in parts:
+            part_str = part.strip()
+            if part_str.startswith("{") and part_str.endswith("}"):
+                cleaned = part_str
+                break
+    else:
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+            
     cleaned = cleaned.strip()
 
     # Parse and validate

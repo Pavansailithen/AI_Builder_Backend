@@ -4,12 +4,13 @@ import json
 
 from pydantic import ValidationError
 
+from app.utils.config import config
 from app.utils.gemini import call_gemini
 from app.validators.models import IntentEntity, IntentOutput, SystemDesignOutput
 
 
 async def design_system(intent: IntentOutput) -> SystemDesignOutput:
-    intent_context = intent.model_dump_json(indent=2)
+    intent_context = intent.model_dump_json()
 
     system_prompt = (
         "You are a senior software architect for an app generation system.\n"
@@ -47,8 +48,10 @@ async def design_system(intent: IntentOutput) -> SystemDesignOutput:
 
     full_prompt = f"{system_prompt}\n\nStructured App Intent:\n{intent_context}"
 
+    active_model = config.GROQ_MODEL.lower()
+    max_tokens = 4096 if ("27b" in active_model or "qwen" in active_model) else 1024
     # Call Gemini
-    raw_response = await call_gemini(full_prompt)
+    raw_response = await call_gemini(full_prompt, max_tokens=max_tokens)
 
     # Clean the response
     cleaned = raw_response.strip()

@@ -105,12 +105,24 @@ class ColumnType(str, Enum):
     datetime_ = "datetime"
     json = "json"
 
-    # Use aliases so that field values serialise to the plain names
     @classmethod
     def _missing_(cls, value):
-        # Allows "float" and "datetime" strings to resolve correctly
+        if not isinstance(value, str):
+            return None
+        val_lower = value.lower()
+        if val_lower in ["varchar", "char", "string"]:
+            return cls.string
+        if val_lower in ["int", "integer", "bigint", "smallint"]:
+            return cls.integer
+        if val_lower in ["float", "double", "decimal", "numeric", "real"]:
+            return cls.float_
+        if val_lower in ["datetime", "timestamp", "date", "time"]:
+            return cls.datetime_
+        if val_lower in ["bool", "boolean"]:
+            return cls.boolean
+
         for member in cls:
-            if member.value == value:
+            if member.value == val_lower:
                 return member
         return None
 
